@@ -1,14 +1,22 @@
-"""冷库温度采集 API（单进程 FastAPI 应用）。
+"""冷库温度采集与归档 API（单进程 FastAPI 应用）。
 
-端点
-----
-* ``GET  /``                演示页面（并发采集 + 故障注入）
+实时采样端点
+------------
+* ``GET  /``                演示页面（并发采集 + 故障注入 + 归档演示）
 * ``GET  /health``          健康检查
 * ``GET  /read/{circuit}``  读取单个回路当前温度
 * ``GET  /read/all``        并发读取全部 8 个回路
 * ``POST /read/batch``      并发读取指定回路列表
 
-每次请求都发起一次真实 Modbus 读取，服务端不缓存任何读数。
+历史归档端点（详见 :mod:`app.archive.router`）
+------------------------------------------------
+* ``POST /archive/batches/{recorder_id}/{export_date}``        上传/替换批次
+* ``GET  /archive/batches``                                    批次清单
+* ``GET  /archive/batches/{recorder_id}/{export_date}``        批次元数据
+* ``GET  /archive/batches/{recorder_id}/{export_date}/readings`` 时段回查
+* ``GET  /archive/batches/{recorder_id}/{export_date}/download`` 原件下载
+
+每次实时请求都发起一次真实 Modbus 读取，服务端不缓存任何采样读数。
 """
 
 from __future__ import annotations
@@ -22,6 +30,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from .archive.router import router as archive_router
+from .archive.store import ArchiveStore
 from .config import Settings, get_settings
 from .modbus_client import ModbusError, ModbusErrorCode, ModbusTcpClient
 
@@ -89,21 +99,40 @@ class BatchResponse(BaseModel):
     failure_count: int
 
 
+archive_store = ArchiveStore(settings.archive_data_dir)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    yield
-    await client.aclose()
+    # 允许测试/嵌入式部署替换存储实现；默认使用模块级单例。
+    store: ArchiveStore = getattr(app.state, "archive_store", archive_store)
+    # 重启后恢复已发布批次，并清理上次进程遗留的暂存/孤儿版本。
+    await store.startup()
+    app.state.archive_store = store
+    app.state.settings = settings
+    try:
+        yield
+    finally:
+        await store.shutdown()
+        await client.aclose()
 
 
 app = FastAPI(
-    title="冷库温度采集 API",
+    title="冷库温度采集与归档 API",
     description=(
-        "单进程 Modbus TCP 采集服务。所有请求共用一条 TCP 连接，支持多笔读取"
-        "同时在途（流水线）、乱序响应匹配、2 秒超时与断线自动重连，读数不缓存。"
+        "单进程冷链温度服务：\n\n"
+        "1. **实时采样**：单条 Modbus TCP 连接，多笔读取流水线在途、"
+        "乱序响应匹配、2 秒超时与断线自动重连，读数不缓存。\n\n"
+        "2. **历史归档**：以记录仪 ID + 导出日期确定批次，流式校验 CSV 并"
+        "建立磁盘索引（内存有界），支持按回路与 UTC 时间闭区间回查、"
+        "原件下载；同批重传原子整体替换，旧版本在途下载结束后回收。"
     ),
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
+app.include_router(archive_router)
+app.state.archive_store = archive_store
+app.state.settings = settings
 
 
 def _validate_circuit(circuit: int) -> None:
@@ -200,7 +229,11 @@ def _build_batch(items: tuple[BatchItem, ...] | list[BatchItem]) -> BatchRespons
 
 @app.get("/health", summary="健康检查")
 async def health() -> dict:
-    return {"status": "ok", "controller": f"{settings.modbus_host}:{settings.modbus_port}"}
+    return {
+        "status": "ok",
+        "controller": f"{settings.modbus_host}:{settings.modbus_port}",
+        "archive_dir": settings.archive_data_dir,
+    }
 
 
 @app.get("/", include_in_schema=False)

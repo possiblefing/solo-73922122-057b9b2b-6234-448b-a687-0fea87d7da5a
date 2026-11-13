@@ -19,7 +19,7 @@ services:
       timeout: 3s
       retries: 10
 
-  # 单进程采集 API：FastAPI，所有调用共用一条到 simulator:5020 的 TCP 连接
+  # 单进程采集+归档 API：FastAPI，所有实时调用共用一条到 simulator:5020 的 TCP 连接
   collector:
     build: .
     image: coldchain-modbus:latest
@@ -32,6 +32,11 @@ services:
       MODBUS_UNIT_ID: "1"
       MODBUS_TIMEOUT_SECONDS: "2"
       REGISTER_COUNT: "8"
+      # 历史归档磁盘根目录（容器内），挂载命名卷后重启保留已发布批次
+      ARCHIVE_DATA_DIR: "/data/archive"
+      ARCHIVE_MAX_UPLOAD_MIB: "16"
+    volumes:
+      - archive-data:/data/archive
     depends_on:
       simulator:
         condition: service_healthy
@@ -40,3 +45,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+volumes:
+  # 归档原件与索引的持久化卷：容器重建/重启后数据不丢
+  archive-data:

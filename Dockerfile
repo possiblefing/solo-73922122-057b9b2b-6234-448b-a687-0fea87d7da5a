@@ -12,6 +12,10 @@ COPY app ./app
 COPY simulator ./simulator
 COPY scripts ./scripts
 
+# 归档数据默认目录（compose 中以命名卷挂载覆盖）
+RUN mkdir -p /data/archive
+ENV ARCHIVE_DATA_DIR=/data/archive
+
 # 采集服务
 EXPOSE 8000
 # 模拟控制器（Modbus 5020 / 控制 API 8081）

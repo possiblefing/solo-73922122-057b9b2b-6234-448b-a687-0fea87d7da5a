@@ -4,3 +4,7 @@ __pycache__/
 .bootstrap/
 .git/
 .venv/
+data/
+*.db
+*.db-wal
+*.db-shm
